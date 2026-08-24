@@ -33,9 +33,9 @@ type FhirBundle = {
 };
 
 type LedgerEntry = {
-  version: string;
   resource: string;
   hash: string;
+  transactionId: string;
   createdAt: string;
 };
 
@@ -55,7 +55,7 @@ const protocol = [
   ['Import', 'Read a de-identified JSON or CSV clinical record.'],
   ['Validate', 'Check mandatory elements for the target FHIR profile.'],
   ['Transform', 'Generate a FHIR R4 Bundle from the imported record.'],
-  ['Anchor', 'Calculate SHA-256 and record the data version locally.'],
+  ['Anchor', 'Submit the SHA-256 fingerprint to the Hyperledger Fabric network.'],
   ['Send', 'POST the FHIR Bundle to the prototype receiving endpoint.'],
 ];
 
@@ -307,16 +307,25 @@ export default function Home() {
     setMessage(`FHIR Bundle generated with ${generatedBundle.entry.length} resources.`);
   }
 
-  async function anchorVersion() {
+  async function anchorWithFabric() {
     if (!bundle || !record) return;
     setBusy(true);
     try {
       const fingerprint = await sha256(JSON.stringify(bundle));
-      const entry: LedgerEntry = { version: `v${ledger.length + 1}`, resource: `Patient/${record.patientId}`, hash: fingerprint, createdAt: new Date().toLocaleString() };
-      setLedger((entries) => [entry, ...entries]);
       setHash(fingerprint);
+      const response = await fetch('/api/provenance', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ recordKey: record.patientId, bundleHash: fingerprint, resourceCount: bundle.entry.length, sourceSystem: record.sourceSystem }),
+      });
+      const result = await response.json() as { error?: string; transactionId?: string };
+      if (!response.ok || !result.transactionId) throw new Error(result.error || 'Fabric did not return a transaction ID.');
+      const entry: LedgerEntry = { resource: `Patient/${record.patientId}`, hash: fingerprint, transactionId: result.transactionId, createdAt: new Date().toLocaleString() };
+      setLedger((entries) => [entry, ...entries]);
       setStage(4);
-      setMessage(`Version ${entry.version} anchored with a SHA-256 provenance hash.`);
+      setMessage(`Fabric committed transaction ${entry.transactionId}. The SHA-256 fingerprint is anchored on-chain.`);
+    } catch (error) {
+      setMessage(error instanceof Error ? `Fabric anchoring failed: ${error.message}` : 'Fabric anchoring failed.');
     } finally {
       setBusy(false);
     }
@@ -363,7 +372,7 @@ export default function Home() {
 
   const action = stage === 1 ? { label: 'Run FHIR validation', handler: runValidation }
     : stage === 2 ? { label: 'Generate FHIR Bundle', handler: transformToFhir }
-      : stage === 3 ? { label: 'Hash and record provenance', handler: anchorVersion }
+      : stage === 3 ? { label: 'Hash and submit to Fabric', handler: anchorWithFabric }
         : stage === 4 ? { label: 'Send FHIR Bundle to receiver', handler: sendBundle }
           : null;
 
@@ -384,7 +393,7 @@ export default function Home() {
       <section className="intro">
         <p className="kicker">Executable research workflow</p>
         <h1>Import, transform, anchor, and transfer a clinical record.</h1>
-        <p>The app reads an actual de-identified file, produces a FHIR Bundle, calculates a SHA-256 fingerprint, and sends the bundle to the prototype receiver.</p>
+        <p>The app reads an actual de-identified file, produces a FHIR Bundle, submits its SHA-256 fingerprint to Hyperledger Fabric, and sends the bundle to the prototype receiver.</p>
       </section>
 
       <section className="run-layout">
@@ -428,7 +437,7 @@ export default function Home() {
             <div><span>Imported file</span><strong>{record ? 'Loaded' : 'Pending'}</strong></div>
             <div><span>FHIR validation</span><strong>{validation?.valid ? 'Passed' : validation ? 'Failed' : 'Pending'}</strong></div>
             <div><span>FHIR resources</span><strong>{bundle ? bundle.entry.length : 'Pending'}</strong></div>
-            <div><span>SHA-256 hash</span><strong className="hash-value">{hash ? displayHash(hash) : 'Pending'}</strong></div>
+            <div><span>Fabric transaction</span><strong className="hash-value">{ledger[0]?.transactionId ? displayHash(ledger[0].transactionId) : 'Pending'}</strong></div>
             <div><span>Transfer receipt</span><strong>{delivery?.receipt || 'Pending'}</strong></div>
           </div>
           <p className="evidence-note">For the article, log validation outcome, transformation time, resource count, hash creation time, and delivery receipt for every run.</p>
@@ -436,8 +445,8 @@ export default function Home() {
       </section>
 
       <section className="ledger-section panel">
-        <div className="panel-heading"><div><p className="kicker">Version and delivery log</p><h2>Local provenance ledger</h2></div><span className="ledger-explainer">Only the fingerprint is recorded</span></div>
-        {ledger.length === 0 ? <div className="empty-ledger"><span>No versions recorded</span><p>After transformation, the app calculates a SHA-256 hash and saves a version entry on this device.</p></div> : <div className="ledger-entry"><span className="ledger-state">Anchored</span><div><strong>{ledger[0].resource} - {ledger[0].version}</strong><small>{ledger[0].createdAt}</small></div><code>{displayHash(ledger[0].hash)}</code><span>{delivery ? `Delivered: ${delivery.receipt}` : 'Not sent yet'}</span></div>}
+        <div className="panel-heading"><div><p className="kicker">Fabric transaction log</p><h2>Blockchain provenance</h2></div><span className="ledger-explainer">Only the fingerprint is stored on-chain</span></div>
+        {ledger.length === 0 ? <div className="empty-ledger"><span>No Fabric transaction recorded</span><p>After transformation, the app calculates a SHA-256 hash and submits it through the Fabric Gateway.</p></div> : <div className="ledger-entry"><span className="ledger-state">Committed</span><div><strong>{ledger[0].resource}</strong><small>{ledger[0].createdAt}</small></div><code>{displayHash(ledger[0].hash)}</code><span>{displayHash(ledger[0].transactionId)}</span></div>}
       </section>
     </main>
   );
