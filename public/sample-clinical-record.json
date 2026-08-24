@@ -1,0 +1,27 @@
+{
+  "patientId": "MUH-2026-001",
+  "patientName": "Amina Rahmani",
+  "facility": "Marrakech University Hospital",
+  "sourceSystem": "De-identified EHR export",
+  "condition": {
+    "display": "Type 2 diabetes",
+    "code": "44054006",
+    "system": "http://snomed.info/sct"
+  },
+  "observations": [
+    {
+      "label": "Hemoglobin A1c",
+      "value": "7.1",
+      "unit": "%",
+      "code": "4548-4",
+      "system": "http://loinc.org"
+    },
+    {
+      "label": "Blood glucose",
+      "value": "104",
+      "unit": "mg/dL",
+      "code": "2339-0",
+      "system": "http://loinc.org"
+    }
+  ]
+}
