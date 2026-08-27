@@ -51,6 +51,31 @@ type Validation = {
   mappedFields: number;
 };
 
+type ExperimentProgress = {
+  completed: number;
+  total: number;
+  phase: string;
+};
+
+type ExperimentRun = {
+  id: string;
+  startedAt: string;
+  requestedRecords: number;
+  completedRecords: number;
+  failedRecords: number;
+  resourceCount: number;
+  preparationMs: number;
+  validationMs: number;
+  transformationMs: number;
+  hashingMs: number;
+  fabricMs: number;
+  deliveryMs: number;
+  totalMs: number;
+  transactionIds: string[];
+  status: 'completed' | 'failed';
+  failure?: string;
+};
+
 const protocol = [
   ['Import', 'Read a de-identified JSON or CSV clinical record.'],
   ['Validate', 'Check mandatory elements for the target FHIR profile.'],
@@ -160,7 +185,9 @@ function normalizeRecord(input: unknown): ClinicalRecord {
 
   const conditionInput = source.condition;
   const conditionObject = conditionInput && typeof conditionInput === 'object' ? conditionInput as Record<string, unknown> : undefined;
-  const conditionText = typeof conditionInput === 'string' ? conditionInput : valueFrom(conditionObject ?? {}, ['display', 'name', 'diagnosis']);
+  const conditionText = typeof conditionInput === 'string'
+    ? conditionInput
+    : valueFrom(conditionObject ?? {}, ['display', 'name', 'diagnosis']) || valueFrom(source, ['diagnosis', 'condition_name']);
   const directGlucose = valueFrom(source, ['glucose', 'blood_glucose']);
   if (directGlucose && observations.length === 0) observations.push({ label: 'Blood glucose', value: directGlucose, unit: 'mg/dL', code: '2339-0', system: 'http://loinc.org' });
 
@@ -237,6 +264,35 @@ function displayHash(hash: string) {
   return `${hash.slice(0, 12)}...${hash.slice(-8)}`;
 }
 
+function formatMilliseconds(milliseconds: number) {
+  if (milliseconds < 1000) return `${milliseconds.toFixed(0)} ms`;
+  return `${(milliseconds / 1000).toFixed(2)} s`;
+}
+
+function formatBenchmarkMilliseconds(milliseconds: number) {
+  return `${milliseconds.toFixed(2)} ms`;
+}
+
+function formatBenchmarkSeconds(milliseconds: number) {
+  return `${(milliseconds / 1000).toFixed(3)} s`;
+}
+
+function createBenchmarkRecord(runId: string, index: number) {
+  const sequence = String(index + 1).padStart(3, '0');
+  return {
+    patient_id: `EXP-${runId}-${sequence}`,
+    patient_name: `Study Patient ${sequence}`,
+    hospital: 'BlockClin Evaluation Center',
+    source_system: 'Synthetic de-identified benchmark',
+    diagnosis: index % 2 === 0 ? 'Hypertension' : 'Type 2 diabetes mellitus',
+    glucose: String(88 + (index % 34)),
+  };
+}
+
+function csvValue(value: string | number) {
+  return `"${String(value).replaceAll('"', '""')}"`;
+}
+
 export default function Home() {
   const [record, setRecord] = useState<ClinicalRecord | null>(null);
   const [fileName, setFileName] = useState('No file imported');
@@ -249,18 +305,33 @@ export default function Home() {
   const [message, setMessage] = useState('Import a de-identified JSON, CSV, or FHIR Bundle file to begin.');
   const [busy, setBusy] = useState(false);
   const [storageReady, setStorageReady] = useState(false);
+  const [experimentSize, setExperimentSize] = useState(10);
+  const [experimentBusy, setExperimentBusy] = useState(false);
+  const [experimentProgress, setExperimentProgress] = useState<ExperimentProgress | null>(null);
+  const [experiments, setExperiments] = useState<ExperimentRun[]>([]);
 
   useEffect(() => {
     const savedLedger = localStorage.getItem('blockclin-ledger');
-    if (savedLedger) {
-      try { setLedger(JSON.parse(savedLedger) as LedgerEntry[]); } catch { localStorage.removeItem('blockclin-ledger'); }
-    }
-    setStorageReady(true);
+    const savedExperiments = localStorage.getItem('blockclin-experiments');
+    const restoreTimer = window.setTimeout(() => {
+      if (savedLedger) {
+        try { setLedger(JSON.parse(savedLedger) as LedgerEntry[]); } catch { localStorage.removeItem('blockclin-ledger'); }
+      }
+      if (savedExperiments) {
+        try { setExperiments(JSON.parse(savedExperiments) as ExperimentRun[]); } catch { localStorage.removeItem('blockclin-experiments'); }
+      }
+      setStorageReady(true);
+    }, 0);
+    return () => window.clearTimeout(restoreTimer);
   }, []);
 
   useEffect(() => {
     if (storageReady) localStorage.setItem('blockclin-ledger', JSON.stringify(ledger));
   }, [ledger, storageReady]);
+
+  useEffect(() => {
+    if (storageReady) localStorage.setItem('blockclin-experiments', JSON.stringify(experiments));
+  }, [experiments, storageReady]);
 
   async function importFile(event: ChangeEvent<HTMLInputElement>) {
     const file = event.target.files?.[0];
@@ -348,6 +419,138 @@ export default function Home() {
     }
   }
 
+  async function runExperiment() {
+    setExperimentBusy(true);
+    setExperimentProgress({ completed: 0, total: experimentSize, phase: 'Preparing benchmark records' });
+    const startedAt = new Date().toISOString();
+    const startedAtMs = performance.now();
+    const runId = `${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`;
+    let completedRecords = 0;
+    let resourceCount = 0;
+    let preparationMs = 0;
+    let validationMs = 0;
+    let transformationMs = 0;
+    let hashingMs = 0;
+    let fabricMs = 0;
+    let deliveryMs = 0;
+    const transactionIds: string[] = [];
+
+    try {
+      for (let index = 0; index < experimentSize; index += 1) {
+        setExperimentProgress({ completed: index, total: experimentSize, phase: 'Preparing and validating FHIR record' });
+        const preparationStart = performance.now();
+        const benchmarkRecord = normalizeRecord(createBenchmarkRecord(runId, index));
+        preparationMs += performance.now() - preparationStart;
+
+        const validationStart = performance.now();
+        const benchmarkValidation = validateRecord(benchmarkRecord);
+        validationMs += performance.now() - validationStart;
+        if (!benchmarkValidation.valid) throw new Error(`Benchmark validation failed for record ${index + 1}.`);
+
+        setExperimentProgress({ completed: index, total: experimentSize, phase: 'Transforming FHIR Bundle' });
+        const transformStart = performance.now();
+        const benchmarkBundle = buildBundle(benchmarkRecord);
+        transformationMs += performance.now() - transformStart;
+        resourceCount += benchmarkBundle.entry.length;
+
+        setExperimentProgress({ completed: index, total: experimentSize, phase: 'Hashing and committing to Fabric' });
+        const hashStart = performance.now();
+        const fingerprint = await sha256(JSON.stringify(benchmarkBundle));
+        hashingMs += performance.now() - hashStart;
+
+        const fabricStart = performance.now();
+        const provenanceResponse = await fetch('/api/provenance', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            recordKey: benchmarkRecord.patientId,
+            bundleHash: fingerprint,
+            resourceCount: benchmarkBundle.entry.length,
+            sourceSystem: benchmarkRecord.sourceSystem,
+          }),
+        });
+        const provenanceResult = await provenanceResponse.json() as { error?: string; transactionId?: string };
+        fabricMs += performance.now() - fabricStart;
+        if (!provenanceResponse.ok || !provenanceResult.transactionId) throw new Error(provenanceResult.error || `Fabric did not commit record ${index + 1}.`);
+        transactionIds.push(provenanceResult.transactionId);
+
+        setExperimentProgress({ completed: index, total: experimentSize, phase: 'Sending Bundle to receiver' });
+        const deliveryStart = performance.now();
+        const deliveryResponse = await fetch('/api/interop', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/fhir+json' },
+          body: JSON.stringify(benchmarkBundle),
+        });
+        const deliveryResult = await deliveryResponse.json() as { error?: string };
+        deliveryMs += performance.now() - deliveryStart;
+        if (!deliveryResponse.ok) throw new Error(deliveryResult.error || `Receiver rejected record ${index + 1}.`);
+
+        completedRecords += 1;
+        setExperimentProgress({ completed: completedRecords, total: experimentSize, phase: 'Record completed' });
+      }
+
+      const completedRun: ExperimentRun = {
+        id: runId,
+        startedAt,
+        requestedRecords: experimentSize,
+        completedRecords,
+        failedRecords: 0,
+        resourceCount,
+        preparationMs,
+        validationMs,
+        transformationMs,
+        hashingMs,
+        fabricMs,
+        deliveryMs,
+        totalMs: performance.now() - startedAtMs,
+        transactionIds,
+        status: 'completed',
+      };
+      setExperiments((runs) => [completedRun, ...runs].slice(0, 12));
+      setMessage(`Experiment completed: ${completedRecords}/${experimentSize} records committed to Fabric and delivered.`);
+    } catch (error) {
+      const failedRun: ExperimentRun = {
+        id: runId,
+        startedAt,
+        requestedRecords: experimentSize,
+        completedRecords,
+        failedRecords: experimentSize - completedRecords,
+        resourceCount,
+        preparationMs,
+        validationMs,
+        transformationMs,
+        hashingMs,
+        fabricMs,
+        deliveryMs,
+        totalMs: performance.now() - startedAtMs,
+        transactionIds,
+        status: 'failed',
+        failure: error instanceof Error ? error.message : 'Unknown benchmark failure.',
+      };
+      setExperiments((runs) => [failedRun, ...runs].slice(0, 12));
+      setMessage(`Experiment stopped after ${completedRecords}/${experimentSize} records. ${failedRun.failure}`);
+    } finally {
+      setExperimentProgress(null);
+      setExperimentBusy(false);
+    }
+  }
+
+  function downloadExperiments() {
+    if (experiments.length === 0) return;
+    const columns = ['run_id', 'started_at', 'status', 'requested_records', 'completed_records', 'failed_records', 'fhir_resources', 'preparation_ms', 'validation_ms', 'transformation_ms', 'hashing_ms', 'fabric_commit_ms', 'receiver_delivery_ms', 'total_ms', 'throughput_records_per_second', 'transaction_ids', 'failure'];
+    const rows = experiments.map((run) => {
+      const throughput = run.completedRecords === 0 ? 0 : run.completedRecords / (run.totalMs / 1000);
+      return [run.id, run.startedAt, run.status, run.requestedRecords, run.completedRecords, run.failedRecords, run.resourceCount, run.preparationMs.toFixed(2), run.validationMs.toFixed(2), run.transformationMs.toFixed(2), run.hashingMs.toFixed(2), run.fabricMs.toFixed(2), run.deliveryMs.toFixed(2), run.totalMs.toFixed(2), throughput.toFixed(3), run.transactionIds.join('|'), run.failure || ''].map(csvValue).join(',');
+    });
+    const blob = new Blob([[columns.join(','), ...rows].join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = 'blockclin-experiment-results.csv';
+    link.click();
+    URL.revokeObjectURL(url);
+  }
+
   function downloadBundle() {
     if (!bundle) return;
     const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: 'application/fhir+json' });
@@ -425,7 +628,7 @@ export default function Home() {
           </> : <div className="empty-record"><strong>No clinical file loaded</strong><p>Choose a JSON or CSV record. You can use the de-identified sample to test the complete process.</p></div>}
 
           {validation && !validation.valid && <div className="validation-errors"><strong>Validation issues</strong>{validation.issues.map((issue) => <span key={issue}>{issue}</span>)}</div>}
-          {action && <button className="action-button" type="button" disabled={busy} onClick={action.handler}>{busy ? 'Working...' : action.label}</button>}
+          {action && <button className="action-button" type="button" disabled={busy || experimentBusy} onClick={action.handler}>{busy ? 'Working...' : action.label}</button>}
           {bundle && <button className="secondary-button" type="button" onClick={downloadBundle}>Download generated FHIR Bundle</button>}
           {stage === 5 && <button className="restart-button" type="button" onClick={resetRun}>Start a new imported record</button>}
         </section>
@@ -447,6 +650,29 @@ export default function Home() {
       <section className="ledger-section panel">
         <div className="panel-heading"><div><p className="kicker">Fabric transaction log</p><h2>Blockchain provenance</h2></div><span className="ledger-explainer">Only the fingerprint is stored on-chain</span></div>
         {ledger.length === 0 ? <div className="empty-ledger"><span>No Fabric transaction recorded</span><p>After transformation, the app calculates a SHA-256 hash and submits it through the Fabric Gateway.</p></div> : <div className="ledger-entry"><span className="ledger-state">Committed</span><div><strong>{ledger[0].resource}</strong><small>{ledger[0].createdAt}</small></div><code>{displayHash(ledger[0].hash)}</code><span>{displayHash(ledger[0].transactionId)}</span></div>}
+      </section>
+
+      <section className="experiment-section panel">
+        <div className="panel-heading"><div><p className="kicker">Research evaluation</p><h2>Experiment mode</h2></div><span className="experiment-badge">Real Fabric commits</span></div>
+        <p className="experiment-intro">Generate de-identified benchmark records and run the same validation, FHIR transformation, SHA-256, Fabric commitment, and receiver delivery workflow. Only fingerprints are submitted on-chain.</p>
+        <div className="experiment-controls">
+          <label><span>Benchmark size</span><select value={experimentSize} disabled={experimentBusy || busy} onChange={(event) => setExperimentSize(Number(event.target.value))}><option value={1}>1 record</option><option value={10}>10 records</option><option value={50}>50 records</option><option value={100}>100 records</option></select></label>
+          <button className="experiment-run" type="button" disabled={experimentBusy || busy} onClick={runExperiment}>{experimentBusy ? 'Running real benchmark...' : 'Run benchmark'}</button>
+        </div>
+        <div className="experiment-status" aria-live="polite"><strong>{experimentBusy && experimentProgress ? `${experimentProgress.completed}/${experimentProgress.total} records` : 'Ready for evaluation'}</strong><span>{experimentBusy && experimentProgress ? experimentProgress.phase : 'Each selected record creates a real Fabric transaction and receiver receipt.'}</span></div>
+        {experiments.length > 0 && <>
+          <div className="experiment-summary">
+            {(() => {
+              const latest = experiments[0];
+              const completed = Math.max(latest.completedRecords, 1);
+              const throughput = latest.completedRecords === 0 ? 0 : latest.completedRecords / (latest.totalMs / 1000);
+              return <><div><span>Latest run</span><strong>{latest.completedRecords}/{latest.requestedRecords}</strong></div><div><span>Fabric avg / record</span><strong>{formatMilliseconds(latest.fabricMs / completed)}</strong></div><div><span>Total time</span><strong>{formatMilliseconds(latest.totalMs)}</strong></div><div><span>Throughput</span><strong>{throughput.toFixed(2)} rec/s</strong></div></>;
+            })()}
+          </div>
+          <div className="experiment-history"><div className="experiment-history-head"><span>Run</span><span>Records</span><span>FHIR</span><span>Fabric avg</span><span>Delivery avg</span><span>Total time</span><span>Status</span></div>{experiments.map((run) => { const completed = Math.max(run.completedRecords, 1); return <div className="experiment-history-row" key={run.id}><code>{run.id.slice(0, 12)}</code><span>{run.completedRecords}/{run.requestedRecords}</span><span>{run.resourceCount}</span><span>{formatBenchmarkSeconds(run.fabricMs / completed)}</span><span>{formatBenchmarkMilliseconds(run.deliveryMs / completed)}</span><span>{formatMilliseconds(run.totalMs)}</span><strong className={run.status === 'completed' ? 'experiment-complete' : 'experiment-failed'} title={run.failure}>{run.status}</strong></div>; })}</div>
+          {experiments.find((run) => run.failure)?.failure && <p className="experiment-failure-note">Recorded failure: {experiments.find((run) => run.failure)?.failure}</p>}
+          <button className="download-experiments" type="button" onClick={downloadExperiments}>Download experiment results CSV</button>
+        </>}
       </section>
     </main>
   );

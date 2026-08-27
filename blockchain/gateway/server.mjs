@@ -17,7 +17,7 @@ const cryptoPath = process.env.FABRIC_CRYPTO_PATH || path.join(fabricSamplesPath
 const keyDirectoryPath = process.env.FABRIC_KEY_DIRECTORY || path.join(cryptoPath, 'users', 'User1@org1.example.com', 'msp', 'keystore');
 const certDirectoryPath = process.env.FABRIC_CERT_DIRECTORY || path.join(cryptoPath, 'users', 'User1@org1.example.com', 'msp', 'signcerts');
 const tlsCertPath = process.env.FABRIC_TLS_CERT || path.join(cryptoPath, 'peers', 'peer0.org1.example.com', 'tls', 'ca.crt');
-const port = Number(process.env.PORT || 8081);
+const port = Number(process.env.PORT || 8082);
 const decoder = new TextDecoder();
 
 async function getFirstFile(directory) {

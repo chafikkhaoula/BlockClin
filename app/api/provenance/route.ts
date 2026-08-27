@@ -1,4 +1,4 @@
-const fabricGatewayUrl = process.env.FABRIC_GATEWAY_URL || 'http://127.0.0.1:8081';
+const fabricGatewayUrl = process.env.FABRIC_GATEWAY_URL || 'http://127.0.0.1:8082';
 
 export async function POST(request: Request) {
   try {
